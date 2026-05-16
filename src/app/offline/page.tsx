@@ -2,7 +2,9 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-type Floor = "1F" | "5F";
+type ReportKey = "M11" | "M15";
+type Floor = "1F" | "4F" | "5F" | "6F";
+type Row2Mode = "seconds" | "slash";
 
 type Row1 = {
   v1: string;
@@ -23,10 +25,10 @@ type Row2 = {
   min: string;
   max: string;
   current: string;
-  sec1: string;
-  sec2: string;
-  sec3: string;
-  sec4: string;
+  a1: string;
+  a2: string;
+  b1: string;
+  b2: string;
 };
 
 type Row3 = {
@@ -46,14 +48,77 @@ type Machine = {
   alarms?: string[];
 };
 
-const STORAGE_KEY = "m15-check-form-v1";
-const defaultInactiveAlarm = "O3 generator 공압벨브 이상없음";
+type ReportConfig = {
+  label: ReportKey;
+  storageKey: string;
+  defaultText: string;
+  floors: Floor[];
+  row2Mode: Row2Mode;
+  defaultInactiveAlarm: string;
+};
 
 const now = new Date();
+const formatted = `${String(now.getFullYear()).slice(2)}.${String(
+  now.getMonth() + 1,
+).padStart(2, "0")}.${String(now.getDate()).padStart(2, "0")}`;
 
-const formatted = `${String(now.getFullYear()).slice(2)}.${String(now.getMonth() + 1).padStart(2, "0")}.${String(now.getDate()).padStart(2, "0")}`;
+const defaultInactiveAlarmM15 = "O3 generator 공압벨브 이상없음";
+const defaultInactiveAlarmM11 = "O3 generator O2, O3공압벨브 Fail";
 
-const defaultText = `M15 가동 점검 (${formatted})
+const defaultTextM11 = `M11 가동 점검 (2026.05.15.)
+
+[1F]
+#1
+24 74 2   14  22  0   360   7/2   (10.0~10.5)9.8
+(-160.0~-180.0)-123.1  290/5400   80/800
+(35.0)35.0   (8.0)8.0
+
+#2
+25  55  0   14 23 0   360   7/2   (10.0~10.5)9.1
+(-130.0~-135.0)-137.4  290/5400   80/800
+(35.0)35.0   (8.0)8.0
+
+#3
+26 92 0   16  28  0   360   7/2   (10.0~10.5)10.8
+(-140.0~-150.0)-56.5  290/5400   80/800
+(35.0)35.0   (8.0)8.1
+
+#4 (비가동)
+O3 generator O2, O3공압벨브 Fail
+
+[4F] 
+#1
+C   24 63 0   360   5/3   (10.0~10.5)8.8
+(-120.0~-126.0)-75.5  290/5400   80/800
+(45.0)45.0   (8.0)8.0
+
+#2 
+C   24  83  0   360   5/3   (10.1~10.4)11.6
+(-48.0~-50.0)15.1
+ 290/5400   80/800
+(45.0)45.0   (8.0)8.0
+
+#3 (비가동)
+O3 generator O2, O3공압벨브 Fail
+ORG Scr
+17.97  7.0  0  -70ILT   -90OLT  19.95Hz
+
+
+[6F]
+#1 (비가동)
+O3 generatorO3 공압벨브 Fail
+
+#2 
+24  59  0   360   7/3  (11.0~11.5)9.0
+(-100~-105)8.7  20/5400   100/750
+(55.0)55.0   (8.0)8.0
+
+#3
+24 49  1  360   7/3   (3.4~3.5)9.8
+(-70.0~-75.0)-25.0  20/5400   100/750
+(55.0)55.0   (8.0)8.0`;
+
+const defaultTextM15 = `M15 가동 점검 (${formatted})
 
 [1F]
 #1010
@@ -130,6 +195,25 @@ O3 generator 공압벨브 이상 없음
 (70.0~60.0)-54.4  10s  180s   10s  300s
 (20.0)20.0   (10.0)9.98`;
 
+const REPORT_CONFIGS: Record<ReportKey, ReportConfig> = {
+  M11: {
+    label: "M11",
+    storageKey: "m11-check-form-v1",
+    defaultText: defaultTextM11,
+    floors: ["1F", "4F", "6F"],
+    row2Mode: "slash",
+    defaultInactiveAlarm: defaultInactiveAlarmM11,
+  },
+  M15: {
+    label: "M15",
+    storageKey: "m15-check-form-v1",
+    defaultText: defaultTextM15,
+    floors: ["1F", "5F"],
+    row2Mode: "seconds",
+    defaultInactiveAlarm: defaultInactiveAlarmM15,
+  },
+};
+
 const defaultRow1: Row1 = {
   v1: "21",
   v2: "10",
@@ -149,10 +233,10 @@ const defaultRow2: Row2 = {
   min: "-130.0",
   max: "-140.0",
   current: "-256.5",
-  sec1: "15",
-  sec2: "150",
-  sec3: "15",
-  sec4: "170",
+  a1: "15",
+  a2: "150",
+  b1: "15",
+  b2: "170",
 };
 
 const defaultRow3: Row3 = {
@@ -174,28 +258,29 @@ const normalizeAlarm = (line: string) => {
   return line.replace(/^\d+\.\s*/, "").trim();
 };
 
-const parseTriple = (tokens: string[]) => {
-  if (tokens.length === 1 && tokens[0] === "C") {
-    return ["", "", ""];
-  }
+const isFloorLine = (line: string) => /^\[(1F|4F|5F|6F)\]$/.test(line.trim());
+const getFloorFromLine = (line: string): Floor | null => {
+  const match = line.trim().match(/^\[(1F|4F|5F|6F)\]$/);
+  return match ? (match[1] as Floor) : null;
+};
 
+const parseTriple = (tokens: string[]) => {
+  if (tokens.length === 1 && tokens[0] === "C") return ["", "", ""];
   return [tokens[0] ?? "", tokens[1] ?? "", tokens[2] ?? ""];
 };
 
 const parseRow1 = (line: string): Row1 => {
   const rangeMatch = line.match(/\(([^~]+)~([^)]+)\)(.+)$/);
-
   if (!rangeMatch) return { ...defaultRow1 };
 
   const min = rangeMatch[1].trim();
   const max = rangeMatch[2].trim();
   const current = rangeMatch[3].trim();
-
   const beforeRange = line.slice(0, rangeMatch.index).trim();
-  const tokens = beforeRange.split(/\s+/);
+  const tokens = beforeRange.split(/\s+/).filter(Boolean);
 
-  const ratio = tokens[tokens.length - 1] ?? "5/2";
-  const v7 = tokens[tokens.length - 2] ?? "360";
+  const ratio = tokens[tokens.length - 1] ?? "";
+  const v7 = tokens[tokens.length - 2] ?? "";
   const valueTokens = tokens.slice(0, -2);
 
   let first = ["", "", ""];
@@ -233,27 +318,42 @@ const parseRow1 = (line: string): Row1 => {
   };
 };
 
-const parseRow2 = (line: string): Row2 => {
-  const match = line.match(
-    /^\(([^~]+)~([^)]+)\)(\S+)\s+(\S+)s\s+(\S+)s\s+(\S+)s\s+(\S+)s$/,
-  );
+const parsePair = (value: string) => {
+  const [left, right] = value.split("/");
+  return [left ?? "", right ?? ""];
+};
 
-  if (!match) return { ...defaultRow2 };
+const parseRow2 = (line: string, mode: Row2Mode): Row2 => {
+  const compactLine = line.trim().replace(/\s+/g, " ");
+  const rangeMatch = compactLine.match(/^\(([^~]+)~([^)]+)\)(\S+)\s*(.*)$/);
+  if (!rangeMatch) return { ...defaultRow2 };
 
-  return {
-    min: match[1].trim(),
-    max: match[2].trim(),
-    current: match[3].trim(),
-    sec1: match[4].trim(),
-    sec2: match[5].trim(),
-    sec3: match[6].trim(),
-    sec4: match[7].trim(),
-  };
+  const min = rangeMatch[1].trim();
+  const max = rangeMatch[2].trim();
+  const current = rangeMatch[3].trim();
+  const rest = rangeMatch[4].trim();
+  const tokens = rest.split(/\s+/).filter(Boolean);
+
+  if (mode === "seconds") {
+    return {
+      min,
+      max,
+      current,
+      a1: (tokens[0] ?? "").replace(/s$/i, ""),
+      a2: (tokens[1] ?? "").replace(/s$/i, ""),
+      b1: (tokens[2] ?? "").replace(/s$/i, ""),
+      b2: (tokens[3] ?? "").replace(/s$/i, ""),
+    };
+  }
+
+  const [a1, a2] = parsePair(tokens[0] ?? "");
+  const [b1, b2] = parsePair(tokens[1] ?? "");
+
+  return { min, max, current, a1, a2, b1, b2 };
 };
 
 const parseRow3 = (line: string): Row3 => {
   const match = line.match(/^\(([^)]+)\)(.*?)\s+\(([^)]+)\)(.*)$/);
-
   if (!match) return { ...defaultRow3 };
 
   return {
@@ -264,27 +364,31 @@ const parseRow3 = (line: string): Row3 => {
   };
 };
 
-const parseReport = (text: string) => {
+const shouldJoinRow2NextLine = (row2Line: string, nextLine: string) => {
+  const row2HasRangeAndCurrentOnly = /^\([^~]+~[^)]+\)\S+$/.test(
+    row2Line.trim(),
+  );
+  const nextHasSlashPairs = /^\d+\/?\d*\s+\d+\/?\d*/.test(nextLine.trim());
+  return row2HasRangeAndCurrentOnly && nextHasSlashPairs;
+};
+
+const parseReport = (text: string, config: ReportConfig) => {
   const rawLines = text
     .replace(/\r/g, "")
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
 
-  let title = rawLines[0] || `M15 가동 점검 (${formatted})`;
-  let floor: Floor = "1F";
+  const title = rawLines[0] || `${config.label} 가동 점검 (${formatted})`;
+  let floor: Floor = config.floors[0] ?? "1F";
   const machines: Machine[] = [];
 
   for (let i = 1; i < rawLines.length; i++) {
     const line = rawLines[i];
+    const nextFloor = getFloorFromLine(line);
 
-    if (line === "[1F]") {
-      floor = "1F";
-      continue;
-    }
-
-    if (line === "[5F]") {
-      floor = "5F";
+    if (nextFloor) {
+      floor = nextFloor;
       continue;
     }
 
@@ -303,8 +407,7 @@ const parseReport = (text: string) => {
       while (
         j < rawLines.length &&
         !rawLines[j].startsWith("#") &&
-        rawLines[j] !== "[1F]" &&
-        rawLines[j] !== "[5F]"
+        !isFloorLine(rawLines[j])
       ) {
         alarms.push(normalizeAlarm(rawLines[j]));
         j++;
@@ -314,7 +417,7 @@ const parseReport = (text: string) => {
         id,
         floor,
         inactive: true,
-        alarms: alarms.length ? alarms : [defaultInactiveAlarm],
+        alarms: alarms.length ? alarms : [config.defaultInactiveAlarm],
       });
 
       i = j - 1;
@@ -322,17 +425,22 @@ const parseReport = (text: string) => {
     }
 
     const row1Line = rawLines[i + 1] ?? "";
-    const row2Line = rawLines[i + 2] ?? "";
-    const row3Line = rawLines[i + 3] ?? "";
+    let row2Line = rawLines[i + 2] ?? "";
+    let row3LineIndex = i + 3;
 
+    if (shouldJoinRow2NextLine(row2Line, rawLines[i + 3] ?? "")) {
+      row2Line = `${row2Line} ${rawLines[i + 3]}`;
+      row3LineIndex = i + 4;
+    }
+
+    const row3Line = rawLines[row3LineIndex] ?? "";
     const alarms: string[] = [];
-    let j = i + 4;
+    let j = row3LineIndex + 1;
 
     while (
       j < rawLines.length &&
       !rawLines[j].startsWith("#") &&
-      rawLines[j] !== "[1F]" &&
-      rawLines[j] !== "[5F]"
+      !isFloorLine(rawLines[j])
     ) {
       alarms.push(normalizeAlarm(rawLines[j]));
       j++;
@@ -343,7 +451,7 @@ const parseReport = (text: string) => {
       floor,
       inactive: false,
       row1: parseRow1(row1Line),
-      row2: parseRow2(row2Line),
+      row2: parseRow2(row2Line, config.row2Mode),
       row3: parseRow3(row3Line),
       alarms,
     });
@@ -356,65 +464,49 @@ const parseReport = (text: string) => {
 
 const formatRulesText = `[붙여넣기 파싱 가능 범위]
 
-가능
+공통 가능
 
+M11 / M15 탭 전환
+각 탭별 자동 저장
 공백 개수 다름
-예) 21 10 0, 21 10 0, 탭 구분
 C 묶음 처리
-예) 26 28 0 C 999 5/5 (11.0~11.5)11.7
-→ 뒤 3개 값이 전부 빈 값으로 처리됨
 알람 번호 포함
-예) 1. OXI #A PCW FLOW RATE HI, HH ALM 반복
-→ 번호 제거 후 알람 내용만 저장
-비가동
-예)
-#1013 (비가동)
-O3 generator 공압벨브 이상없음
-문자열 포함
-예) (60.0)55 ~ 67 헌팅 (10.0)10.0 ~ 10.6 헌팅
+비가동 장비 여러 줄 특이사항
+문자열 포함 현재값
+
+M15 2행
+예) (-130.0~-140.0)-256.5 15s 150s 15s 170s
+
+M11 2행
+예) (-160.0~-180.0)-123.1 290/5400 80/800
+예) (-48.0~-50.0)15.1 다음 줄에 290/5400 80/800 이 와도 자동 결합
 
 필수 형식
 
-장비번호는 #1010 형태
-비가동은 #1013 (비가동) 형태
-1행은 앞3개 뒤3개 360 5/2 (11.0~11.5)11.3 구조
-2행은 (-130.0~-140.0)-256.5 15s 150s 15s 170s 구조
-3행은 (55.0)54.5 (10.0)10.0 구조
+층은 [1F], [4F], [5F], [6F] 형태
+장비번호는 #1010 또는 #1 형태
+비가동은 #1 (비가동) 형태
 줄 순서는 장비번호 → 1행 → 2행 → 3행 → 알람 순서
 
 깨질 수 있는 경우
 
 장비번호 앞에 #이 없음
-예) 1010
 비가동 표시가 다름
-예) #1013 비가동, #1013 - 비가동
 비율이 / 형태가 아님
-예) 5 2, 5:2
 기준 범위 괄호가 없음
-예) 11.0~11.5 11.3
-기준 범위와 현재값 사이가 분리됨
-예) (11.0~11.5) 11.3
-2행 시간값에 s가 없음
-예) 15 150 15 170
-C를 묶음이 아니라 중간값으로 사용
-예) 14 C 0
-1행 값 개수가 애매함
-예) 21 10 0 14 10 360 5/2 ...
 줄 순서가 바뀜
-예) 1행 → 3행 → 2행
 한 장비 안에서 1행/2행/3행 중 일부 줄이 빠짐
-알람이 장비 데이터 중간에 들어감
-예) 1행 → 알람 → 2행 → 3행
+알람이 장비 데이터 중간에 들어감`;
 
-요약
-
-기존 점검표 포맷을 유지한 복붙은 안정적
-공백 차이는 괜찮음
-구조, 괄호, /, s, 줄 순서가 바뀌면 깨질 수 있음`;
-
-const initialParsed = parseReport(defaultText);
+const getInitialState = (config: ReportConfig) =>
+  parseReport(config.defaultText, config);
 
 export default function Page() {
+  const [activeReport, setActiveReport] = useState<ReportKey>("M15");
+  const config = REPORT_CONFIGS[activeReport];
+
+  const initialParsed = useMemo(() => getInitialState(config), [config]);
+
   const [title, setTitle] = useState(initialParsed.title);
   const [machines, setMachines] = useState<Machine[]>(initialParsed.machines);
   const [pasteText, setPasteText] = useState("");
@@ -423,24 +515,45 @@ export default function Page() {
   const [isFormatRulesOpen, setIsFormatRulesOpen] = useState(false);
 
   useEffect(() => {
-    const savedData = localStorage.getItem(STORAGE_KEY);
-    if (!savedData) return;
+    const parsedDefault = getInitialState(config);
+    const savedData = localStorage.getItem(config.storageKey);
+
+    if (!savedData) {
+      setTitle(parsedDefault.title);
+      setMachines(parsedDefault.machines);
+      setPasteText("");
+      return;
+    }
 
     try {
       const parsed = JSON.parse(savedData);
-      if (Array.isArray(parsed.machines)) setMachines(parsed.machines);
+      setTitle(
+        typeof parsed.title === "string" ? parsed.title : parsedDefault.title,
+      );
+      setMachines(
+        Array.isArray(parsed.machines)
+          ? parsed.machines
+          : parsedDefault.machines,
+      );
+      setPasteText("");
     } catch {
       console.warn("저장 데이터 복원 실패");
+      setTitle(parsedDefault.title);
+      setMachines(parsedDefault.machines);
+      setPasteText("");
     }
-  }, []);
+  }, [config]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ machines }));
+    localStorage.setItem(
+      config.storageKey,
+      JSON.stringify({ title, machines }),
+    );
     setSaved(true);
 
     const timer = setTimeout(() => setSaved(false), 800);
     return () => clearTimeout(timer);
-  }, [title, machines]);
+  }, [config.storageKey, title, machines]);
 
   const updateMachine = (
     machineIndex: number,
@@ -475,12 +588,10 @@ export default function Page() {
   };
 
   const outputText = useMemo(() => {
-    const floors: Floor[] = ["1F", "5F"];
-
     return [
       title,
       "",
-      ...floors.flatMap((floor) => {
+      ...config.floors.flatMap((floor) => {
         const floorMachines = machines.filter((m) => m.floor === floor);
         if (floorMachines.length === 0) return [];
 
@@ -499,6 +610,19 @@ export default function Page() {
             const row2 = machine.row2 ?? defaultRow2;
             const row3 = machine.row3 ?? defaultRow3;
 
+            const row2Text =
+              config.row2Mode === "seconds"
+                ? `(${fmt(row2.min)}~${fmt(row2.max)})${fmt(
+                    row2.current,
+                  )}   ${fmt(row2.a1)}s  ${fmt(row2.a2)}s   ${fmt(
+                    row2.b1,
+                  )}s  ${fmt(row2.b2)}s`
+                : `(${fmt(row2.min)}~${fmt(row2.max)})${fmt(
+                    row2.current,
+                  )}   ${fmt(row2.a1)}/${fmt(row2.a2)}   ${fmt(
+                    row2.b1,
+                  )}/${fmt(row2.b2)}`;
+
             return [
               header,
               `${formatTriple(row1.v1, row1.v2, row1.v3)}   ${formatTriple(
@@ -508,11 +632,7 @@ export default function Page() {
               )}   ${fmt(row1.v7)}   ${fmt(row1.ratio1)}/${fmt(
                 row1.ratio2,
               )}   (${fmt(row1.min)}~${fmt(row1.max)})${fmt(row1.current)}`,
-              `(${fmt(row2.min)}~${fmt(row2.max)})${fmt(
-                row2.current,
-              )}   ${fmt(row2.sec1)}s  ${fmt(row2.sec2)}s   ${fmt(
-                row2.sec3,
-              )}s  ${fmt(row2.sec4)}s`,
+              row2Text,
               `(${fmt(row3.target1)})${fmt(row3.current1)}   (${fmt(
                 row3.target2,
               )})${fmt(row3.current2)}`,
@@ -527,7 +647,7 @@ export default function Page() {
     ]
       .join("\n")
       .trim();
-  }, [machines, title]);
+  }, [config.floors, config.row2Mode, machines, title]);
 
   const copyText = async () => {
     await navigator.clipboard.writeText(outputText);
@@ -536,14 +656,14 @@ export default function Page() {
   };
 
   const applyPasteText = () => {
-    const parsed = parseReport(pasteText);
+    const parsed = parseReport(pasteText, config);
     setTitle(parsed.title);
     setMachines(parsed.machines);
   };
 
   const resetStorage = () => {
-    localStorage.removeItem(STORAGE_KEY);
-    const parsed = parseReport(defaultText);
+    localStorage.removeItem(config.storageKey);
+    const parsed = parseReport(config.defaultText, config);
     setTitle(parsed.title);
     setMachines(parsed.machines);
     setPasteText("");
@@ -551,6 +671,22 @@ export default function Page() {
 
   return (
     <main style={styles.page}>
+      <div style={styles.reportTabs}>
+        {(Object.keys(REPORT_CONFIGS) as ReportKey[]).map((key) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setActiveReport(key)}
+            style={{
+              ...styles.reportTab,
+              ...(activeReport === key ? styles.reportTabActive : {}),
+            }}
+          >
+            {key}
+          </button>
+        ))}
+      </div>
+
       <div style={styles.header}>
         <input
           value={title}
@@ -579,9 +715,9 @@ export default function Page() {
 
       <section style={styles.pasteBox}>
         <div style={styles.pasteHeader}>
-          <strong>점검표 붙여넣기</strong>
+          <strong>{activeReport} 점검표 붙여넣기</strong>
           <span style={styles.savedText}>
-            {saved ? "자동 저장됨" : "브라우저에 자동 저장"}
+            {saved ? "자동 저장됨" : `${activeReport} 브라우저에 자동 저장`}
           </span>
         </div>
 
@@ -598,7 +734,7 @@ export default function Page() {
           </button>
 
           <button onClick={resetStorage} style={styles.resetButton}>
-            저장값 초기화
+            {activeReport} 저장값 초기화
           </button>
         </div>
       </section>
@@ -610,7 +746,10 @@ export default function Page() {
           const row3 = machine.row3 ?? defaultRow3;
 
           return (
-            <div key={`${machine.floor}-${machine.id}`} style={styles.card}>
+            <div
+              key={`${activeReport}-${machine.floor}-${machine.id}`}
+              style={styles.card}
+            >
               <div style={styles.cardHeader}>
                 <h2 style={styles.machineTitle}>#{machine.id}</h2>
                 <span style={styles.floorBadge}>{machine.floor}</span>
@@ -629,7 +768,7 @@ export default function Page() {
                           alarms: checked
                             ? prev.alarms && prev.alarms.length > 0
                               ? prev.alarms
-                              : [defaultInactiveAlarm]
+                              : [config.defaultInactiveAlarm]
                             : prev.alarms,
                           row1: checked ? prev.row1 : { ...defaultRow1 },
                           row2: checked ? prev.row2 : { ...defaultRow2 },
@@ -729,24 +868,32 @@ export default function Page() {
                         onChange={(v) => updateRow2(machineIndex, "current", v)}
                       />
                       <Field
-                        label="초1"
-                        value={row2.sec1}
-                        onChange={(v) => updateRow2(machineIndex, "sec1", v)}
+                        label={
+                          config.row2Mode === "seconds" ? "초1" : "앞 분자"
+                        }
+                        value={row2.a1}
+                        onChange={(v) => updateRow2(machineIndex, "a1", v)}
                       />
                       <Field
-                        label="초2"
-                        value={row2.sec2}
-                        onChange={(v) => updateRow2(machineIndex, "sec2", v)}
+                        label={
+                          config.row2Mode === "seconds" ? "초2" : "앞 분모"
+                        }
+                        value={row2.a2}
+                        onChange={(v) => updateRow2(machineIndex, "a2", v)}
                       />
                       <Field
-                        label="초3"
-                        value={row2.sec3}
-                        onChange={(v) => updateRow2(machineIndex, "sec3", v)}
+                        label={
+                          config.row2Mode === "seconds" ? "초3" : "뒤 분자"
+                        }
+                        value={row2.b1}
+                        onChange={(v) => updateRow2(machineIndex, "b1", v)}
                       />
                       <Field
-                        label="초4"
-                        value={row2.sec4}
-                        onChange={(v) => updateRow2(machineIndex, "sec4", v)}
+                        label={
+                          config.row2Mode === "seconds" ? "초4" : "뒤 분모"
+                        }
+                        value={row2.b2}
+                        onChange={(v) => updateRow2(machineIndex, "b2", v)}
                       />
                     </div>
                   </div>
@@ -914,6 +1061,26 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily:
       "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
   },
+  reportTabs: {
+    display: "flex",
+    gap: 8,
+    marginBottom: 14,
+    flexWrap: "wrap",
+  },
+  reportTab: {
+    padding: "10px 18px",
+    border: "1px solid #d6d6d6",
+    borderRadius: 999,
+    background: "#fff",
+    color: "#111",
+    fontWeight: 900,
+    cursor: "pointer",
+  },
+  reportTabActive: {
+    background: "#111",
+    color: "#fff",
+    borderColor: "#111",
+  },
   header: {
     display: "flex",
     gap: 12,
@@ -969,6 +1136,8 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "space-between",
     marginBottom: 8,
     fontSize: 14,
+    gap: 10,
+    flexWrap: "wrap",
   },
   savedText: {
     color: "#666",
